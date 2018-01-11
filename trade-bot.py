@@ -41,6 +41,10 @@ def lambda_handler(event, context):
     ETHUSD = float(r.split("price\': u\'")[1].split("\'")[0])
     # print("\nETH/USD " + str(ETHUSD))
     getTickerPriceChanges(str(ETHUSD), str(ETHUSD), "ETH")
+
+    #symbol price
+    priceList = str(requests.get('https://api.binance.com/api/v1/ticker/allPrices').json()) #, headers=headers)
+    coinArray = priceList.split("{u\'symbol\': u\'")
     
     count = 0
     for coin in coinArray:
@@ -257,7 +261,7 @@ def buyTopBreakout():
     
     currentHold = getCurrentHold()
     print("current hold: " + currentHold)
-    print("hold ETH value: " + str(holdETH) + " top new pick price: " + str(bestPrice))
+    print("hold ETH value: " + str(holdETH) + " top new pick " + best + " price: " + str(bestPrice) + " with " + str(bestChange) + "% change.")
     holdIsETH = False
     if holdETH == 0.0:
         holdETH = getEthQuantity()
@@ -277,7 +281,6 @@ def buyTopBreakout():
             })
         if sell == True:
             sellHoldForEth()
-            print("quantity is " + str(quantity) + " " + best + " for " + str(bestPrice))
             print("Top breakout is " + best + " @ " + str(bestPrice) + " & " + str(bestChange) + "% change\nBuying " + str(quantity))
             global botActions
             try:
@@ -359,18 +362,21 @@ def email():
                 },
                 Source=SENDER,
                 )
-        # Display an error if something goes wrong.	
+        # Display an error if something goes wrong. 
         except ClientError as e:
                 print(e.response['Error']['Message'])
         else:
                 print("Email sent! Message ID:"),
                 print(response['ResponseMetadata']['RequestId'])
-                
+
+#
+#Binance Wrapper Class
+#
+
 if six.PY2:
     from urllib import urlencode
 elif six.PY3:
     from urllib.parse import urlencode
-
 
 class Client(object):
 
