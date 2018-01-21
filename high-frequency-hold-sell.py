@@ -20,29 +20,40 @@ lambda_client = boto3.client('lambda')
 api_key=""
 api_secret=""
 
-
+global breakouts
+global downturns
+global botActions
+global holdETH
+global coinPrices
+global balances
+global holdQ
+global holdPercentageChange
+global currentPrice
+global priceChangeList
+global xs
+global ys
+global intervalsPerScan
+global priceUpdateStart
+global counter
+xs = []
+ys = []
+priceChangeList = []
+currentPrice = 0.0
+holdPercentageChange = 0.0 
+holdQ = 0
+priceUpdateStart = 0
+counter = 0
+    
+#scans for x seconds with y iterations per scan and then buys or sells based upon price direction and gain/loss %
 def lambda_handler(event, context):
-    
-    global breakouts
-    global downturns
-    global botActions
-    global holdETH
-    global coinPrices
-    global balances
-    global holdQ
-    global holdPercentageChange
-    global lastPrice
-    global currentPrice
-    currentPrice = 0.0
-    lastPrice = 0.0
-    holdPercentageChange = 0.0
-    holdQ = 0
-    
-    #we need to check the price as quickly as possible and sell to ETH if it falls beneath our buy price
-    #the other script can then pick up where it left
-    for x in range(0, 9):
+    global intervalsPerScan
+    global counter
+    intervalsPerScan = 30
+    scanDuration = 300
+    for x in range(0, intervalsPerScan):
         holdOrSellHold()
-        time.sleep(10)
+        counter = counter + 1
+        time.sleep(int(scanDuration/intervalsPerScan))
 
 def query_table(filter_key=None, filter_value=None):
     if filter_key and filter_value:
@@ -51,26 +62,24 @@ def query_table(filter_key=None, filter_value=None):
         response = table.query(KeyConditionExpression=filtering_exp)
     else:
         response = table.query()
-
+        
     return response
 
 def getCurrentHold():
+    global holdQ
+    global holdETH
+    global currentPrice
+    
     hold = "MYHOLD"
     oldTicker = query_table("symbol", hold)['Items'][0]['holdSymbol']
     if oldTicker == "ETH":
-        return "STAHP"
+        return "STOP"
+        
     oldBuyPrice = query_table("symbol", hold)['Items'][0]['ETH-value']
     oldQuantity = query_table("symbol", hold)['Items'][0]['quantity']
-    lastP = query_table("symbol", hold)['Items'][0]['lastPrice']
-    
-    global lastPrice
-    global holdQ
     holdQ = oldQuantity
-    lastPrice = lastP
-    
+
     #get current price of hold
-    global holdETH
-    global currentPrice
     params = {"symbol": oldTicker + "ETH"}
     print("getting price of " + oldTicker)
     r = str(requests.get('https://api.binance.com/api/v1/ticker/price', params=params).json())
@@ -80,9 +89,9 @@ def getCurrentHold():
     updateLastPrice(price, oldTicker, oldBuyPrice)
     
     rounding = 3
-    print(oldQuantity)
+    #if the other script bought 0 set a 99% loss to trigger a sell and to find the next buy
     if oldQuantity == "0":
-        percentChange = 90
+        percentChange = 1
     else:
         percentChange = float(holdETH)/float(oldBuyPrice) * 100
         # print("hold price " + str(oldBuyPrice) + " current price " + str(price))
@@ -92,18 +101,18 @@ def getCurrentHold():
     print(str(percentChange - 100) + "% from hold buy price")
     return oldTicker
 
+#add x and y points to scatter plot
 def updateLastPrice(price, ticker, oldBuyPrice):
-    table.put_item(
-            Item={
-            'symbol': "MYHOLD",
-            'ETH-value': str(oldBuyPrice),
-            'holdSymbol': ticker,
-            'quantity': str(holdQ),
-            'lastPrice': str(price),
-            'timeStamp': "blah"
-    })
-    
-#sell hold
+    global xs
+    global ys
+    global priceUpdateStart
+    global counter
+    xs.append(len(xs))
+    ys.append(price)
+    if priceUpdateStart == 0:
+        priceUpdateStart = counter
+        
+#sell hold & update dynamo row
 def sellHoldForEth(hold):
     global holdQ
     global holdETH
@@ -116,36 +125,63 @@ def sellHoldForEth(hold):
         'timeStamp': "blah"
         })
     print("selling " + str(holdQ) +  " " + hold + " worth " + str(holdETH))
-    binanceClient = Client(api_key, api_secret)
-    response = binanceClient.order_market_sell(symbol=hold + "ETH", quantity=holdQ)
+    # binanceClient = Client(api_key, api_secret)
+    # response = binanceClient.order_market_sell(symbol=hold + "ETH", quantity=holdQ)
 
 def holdOrSellHold():
+    global holdPercentageChange
     hold = getCurrentHold()
-    if hold != "STAHP":
-        global holdPercentageChange
-        if (holdPercentageChange > 101 and priceGoingDown() == True) or holdPercentageChange < 99:
+    if hold != "STOP":
+        # sell if we gained 1% and the price isn't going up or if it's gone down by 1-1.9% (more than that might just be a temprary price shift)
+        if (holdPercentageChange > 101 and priceGoingDown() == True) or (holdPercentageChange < 99 and holdPercentageChange > 98):
             print("selling " + hold + " @ " + str(holdPercentageChange) + "%")
             sellHoldForEth(hold)
         else:
             print("holding " + hold)
     else:
         print("Waiting on trade")
-        lambda_client.invoke(FunctionName='BinanceAPItest',
-                            InvocationType='RequestResponse')
+        lambda_client.invoke(FunctionName='BinanceAPItest', InvocationType='RequestResponse')
 
 #identifies if the price is going down
 def priceGoingDown():
-    global currentPrice
-    print("current price " + str(currentPrice) + " " + "last price " + str(lastPrice))
-    rounding = 3
-    percentChange = float(currentPrice)/float(lastPrice) * 100
-    percentChange = float(float(int(percentChange * 10 ** rounding))/10 ** rounding) 
-    print(str(percentChange - 100) + "% from last price")
-    if currentPrice < lastPrice:
-        return True
+    global priceUpdateStart
+    slope = 0.0
+    #if we are at our final iteration take the slope
+    global intervalsPerScan
+    if len(xs) == intervalsPerScan - priceUpdateStart + 1:
+        slope = bestFit()
+        #if our slope after 1 minute is positive hold
+        if slope < 0:
+            return True
+        else:
+            return False
+    #if not our final iteration, hold
     else:
         return False
-
+        
+def bestFit():
+    sum_x= 0.0
+    sum_y= 0.0
+    sum_xy= 0.0
+    sum_x2 = 0.0
+    #loop over data:
+    for count in range(len(xs)):
+        sum_x = sum_x + xs[count]
+        sum_y = sum_y + ys[count]
+        sum_xy = sum_xy + xs[count] * ys[count]
+        sum_x2 = sum_x2 + xs[count] * xs[count]
+    
+    #means
+    mean_x = sum_x / len(xs)
+    mean_y = sum_y / len(ys)
+    
+    varx = sum_x2 - sum_x * mean_x
+    cov = sum_xy - sum_x * mean_y
+    
+    slope = cov / varx
+    intersect = mean_y - slope * mean_x
+    print("slope: " + str(slope))
+    return slope
 #
 #Binance API Wrapper
 #
