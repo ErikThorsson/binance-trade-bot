@@ -65,7 +65,7 @@ def lambda_handler(event, context):
     priceUpdateStart = 0
     marketPriceUpdateStart = 0
     counter = 0
-    intervalsPerScan = 28 
+    intervalsPerScan = 25 
     scanDuration = 295.67
     counter = 0;
     #run the other script to determine if another coin is rising faster than our current hold
@@ -100,7 +100,6 @@ def getCurrentHold():
 
     #get current price of hold
     params = {"symbol": oldTicker + "ETH"}
-    print("getting price of " + oldTicker)
     r = str(requests.get('https://api.binance.com/api/v1/ticker/price', params=params).json())
     price = float(r.split("price\': u\'")[1].split("\'")[0])
     holdETH = float(oldQuantity) * price
@@ -112,11 +111,10 @@ def getCurrentHold():
         percentChange = 1
     else:
         percentChange = float(holdETH)/float(oldBuyPrice) * 100
-        print("hold price " + str(oldBuyPrice) + " current price " + str(price))
         percentChange = float(float(int(percentChange * 10 ** rounding))/10 ** rounding)    
     global holdPercentageChange
     holdPercentageChange = percentChange
-    print(str(percentChange - 100) + "% from hold buy price")
+    print(oldTicker + " " + str(percentChange - 100) + "% from hold buy price. Hold price: " + str(oldBuyPrice) + " Current price: " + str(price))
     return oldTicker
 
 #add x and y points to scatter plot
@@ -156,8 +154,8 @@ def holdOrSellHold():
         if(priceGoingDown() == True and isMarketGoingDown == False or (holdPercentageChange < 97.5 and holdPercentageChange > 96.5 and priceGoingDown() == True and isMarketGoingDown == False)):
             print("selling " + hold + " @ " + str(holdPercentageChange - 100) + "%")
             sellHoldForEth(hold)
-        else:
-            print("holding " + hold)
+        # else:
+        #     print("holding " + hold)
     else:
         #if our hold is ETH buy the fastest rising coin
         print("Waiting on trade")
@@ -172,7 +170,7 @@ def priceGoingDown():
 
     slope = 0.0
     #if we are at our final iteration take the slope
-    print("intervals " + str(intervalsPerScan) + " priceUpdateStart " + str(priceUpdateStart) + " count " + str(len(xs)))
+    # print("intervals " + str(intervalsPerScan) + " priceUpdateStart " + str(priceUpdateStart) + " count " + str(len(xs)))
     if len(xs) == intervalsPerScan - priceUpdateStart + 1:
         print("Hold slope:")
         slope = bestFit(xs, ys)
@@ -214,10 +212,9 @@ def marketGoingDown():
         
     # set the time and price for the average of the market
     marketXs.append(len(marketXs))
-    print(str(marketPriceSum) + " count " + str(count))
     marketAveragePrice = marketPriceSum / float(count)
     marketYs.append(marketAveragePrice)
-    print("market avg " + str(marketAveragePrice) + " " + str(len(marketXs)))
+    # print("market average price " + str(marketAveragePrice) + " " + str(len(marketXs)))
     
     if len(marketXs) == intervalsPerScan - marketPriceUpdateStart + 1:
         print("Market slope:")
@@ -253,7 +250,7 @@ def bestFit(xs, ys):
     
     slope = cov / varx
     intersect = mean_y - slope * mean_x
-    print("slope: " + str(slope))
+    print(str(slope))
     return slope
     
 #
