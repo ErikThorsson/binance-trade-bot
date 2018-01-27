@@ -14,11 +14,9 @@ from datetime import datetime, timedelta
 
 dynamodb = boto3.resource('dynamodb')
 table = dynamodb.Table('coin-price-history')
-client = boto3.client('sns')
 
 api_key=""
 api_secret=""
-
 
 def lambda_handler(event, context):
     
@@ -31,28 +29,17 @@ def lambda_handler(event, context):
     global queryTimeBack
     global holdQuantity
     holdQuantity = 0.0
-    queryTimeBack = .06
+    #this runs every 5 min so get slightly before that
+    queryTimeBack = .012
     coinPrices = {}
     balances = ""
     breakouts = ""
     downturns = ""
     holdETH = 0.0
     botActions = "No actions taken"
-    
-    params = {"symbol":"BTCUSDT"}
-    r = str(requests.get('https://api.binance.com/api/v1/ticker/price', params=params).json())
-    BTCUSD = float(r.split("price\': u\'")[1].split("\'")[0])
-    # print("\nBTC/USD " + str(BTCUSD))
-    getTickerPriceChanges(str(BTCUSD), str(BTCUSD), "BTC")
-    
-    params = {"symbol":"ETHUSDT"}
-    r = str(requests.get('https://api.binance.com/api/v1/ticker/price', params=params).json())
-    ETHUSD = float(r.split("price\': u\'")[1].split("\'")[0])
-    # print("\nETH/USD " + str(ETHUSD))
-    getTickerPriceChanges(str(ETHUSD), str(ETHUSD), "ETH")
 
     #symbol price
-    priceList = str(requests.get('https://api.binance.com/api/v1/ticker/allPrices').json())
+    priceList = str(requests.get('https://api.binance.com/api/v1/ticker/allPrices').json()) #, headers=headers)
     coinArray = priceList.split("{u\'symbol\': u\'")
     
     binanceClient = Client(api_key, api_secret)
@@ -60,11 +47,11 @@ def lambda_handler(event, context):
 
     count = 0
     for coin in coinArray:
-        # if count == 10:
-        #     break
         if not coin.__eq__("["):
             ticker = coin.split('\',')[0]
             price = coin.split('u\'price\': u\'')[1].split("\'},")[0]
+            if price.__contains__("\'}]"):
+                price = str(price).split("\'}]")[0]
             count += 1
             #only get coins that trade in ETH for now
             if ticker.__contains__("ETH") and not ticker.__contains__("ETHBTC"):
@@ -72,8 +59,7 @@ def lambda_handler(event, context):
                 for split in coinNameSplit:
                     if not split.__eq__(""):
                         coinName = split
-                priceUSD = str(float(price) * ETHUSD)
-                getTickerPriceChanges(priceUSD, price, coinName)
+                getTickerPriceChanges(price, coinName)
 
     buyTopBreakout()
 
@@ -124,15 +110,14 @@ def sellForGainOrHardLoss(newBuyPrice, unitPrice, ticker, quantity):
     print("Hold value was " + str(oldBuyPrice) + " and is now worth " + str(holdETH) + " which is " + str(percentChange) + "% of the buy price.")
     # print(holdETH > oldBuyPrice)
     
-    # if the price has gone up 3% or down 25% sell
-    if float(holdETH)/float(oldBuyPrice) >= 1.03 or float(holdETH)/float(oldBuyPrice) <= .50:
+    # if the price hasn't gone down or has gone down 50% sell
+    if float(holdETH)/float(oldBuyPrice) >= 1.0 or float(holdETH)/float(oldBuyPrice) <= .50:
         table.put_item(
             Item={
             'symbol': "MYHOLD",
             'ETH-value': str(newBuyPrice),
             'holdSymbol': ticker,
             'quantity': quantity,
-            'lastPrice': str(unitPrice),
             'timeStamp': "blah"
         })
         print("SELL HOLD")
@@ -144,19 +129,10 @@ def sellForGainOrHardLoss(newBuyPrice, unitPrice, ticker, quantity):
  
 #sell hold
 def sellHoldForEth(hold):
-    print("selling " + str(balanceAmount) + " " +  balance['asset'])
     global holdQuantity
     global holdETH
+    binanceClient = Client(api_key, api_secret)
     response = binanceClient.order_market_sell(symbol=hold + "ETH", quantity=holdQuantity)
-    #set the hold to eth
-    table.put_item(
-        Item={
-        'symbol': "MYHOLD",
-        'ETH-value': str(holdETH),
-        'holdSymbol': 'ETH',
-        'quantity': holdQuantity,
-        'timeStamp': "blah"
-        })
         
 def getEthQuantity():
     binanceClient = Client(api_key, api_secret)
@@ -170,19 +146,16 @@ def getEthQuantity():
             return balanceAmount
     return 0.0
 
-def getTickerPriceChanges(priceUSD, priceETH, coinName):
+def getTickerPriceChanges(priceETH, coinName):
     time = str(datetime.now())
-    # print("saving " + coinName + " " + str(priceUSD))
-    
+
     table.put_item(
     Item={
     'symbol': coinName,
     'ETH-value': str(priceETH),
-    'USD-price': str(priceUSD),
     'timeStamp': time 
     })
 
-    #price from at most 1/2 hrs ago
     try:
         priceLastQuery = query_table("symbol", coinName)['Items'][0]['ETH-value']
     except Exception as e:
@@ -198,8 +171,8 @@ def getTickerPriceChanges(priceUSD, priceETH, coinName):
     
     # print(coinName + " " + percentChange) # + '\n' + str(priceETH) + " " + str(priceLastQuery))
     #if the price is greater than 6/24 hrs ago this might indicate that it isn't in a bearish trend
-    #need more indicators.... the decision making is lacking 
-    if float(percentChange) >= 0.01 and float(percentChange) <= 0.05: # and priceLastQuery > price6HoursAgo and price6HoursAgo > price24HoursAgo: #and float(percentChange) <= 5
+    
+    if float(percentChange) >= 0.01: # and float(percentChange) <= 0.1: # and priceLastQuery > price6HoursAgo and price6HoursAgo > price24HoursAgo: #and float(percentChange) <= 5
         # print("The price of " + coinName + " is now " + str(priceLastQuery)) #+ ", was " + str(price6HoursAgo) + " 6 hrs ago, and " + str(price24HoursAgo) + " 24 hrs ago. "  + str(percentChangePast24Hrs) + "% change past 24 hrs " + str(percentChangePast6Hrs) + "% change past 6 hrs " + str(percentChange) + "% change past 5 min.")
         global breakouts
         if not breakouts.__contains__(coinName):
@@ -259,31 +232,40 @@ def buyTopBreakout():
             table.put_item(
             Item={
             'symbol': "MYHOLD",
-            'ETH-value': str(holdETH),
+            'ETH-value': str(quantity * bestPrice),
             'holdSymbol': best,
             'quantity': quantity,
-            'lastPrice': str(bestPrice),
             'timeStamp': "blah"
             })
         if sell == True:
-            sellHoldForEth(hold)
+            sellHoldForEth(currentHold)
             print("Top breakout is " + best + " @ " + str(bestPrice) + " & " + str(bestChange) + "% change\nBuying " + str(quantity))
             global botActions
             try:
                 # buy(ticker)
-                binanceClient = Client(api_key, api_secret)
+                # binanceClient = Client(api_key, api_secret)
                 print("buying " + best + " with quantity " + str(quantity))
-                response = binanceClient.order_market_buy(symbol=best + "ETH", quantity=quantity)
-                print(response)
-                botActions = "Top breakout is " + best + " @ " + str(bestPrice) + " ETH & " + str(bestChange) + "% change\nBuying " + str(quantity)
-                email()
+                # response = binanceClient.order_market_buy(symbol=best + "ETH", quantity=quantity)
+                # print(response)
+                # botActions = "Top breakout is " + best + " @ " + str(bestPrice) + " ETH & " + str(bestChange) + "% change\nBuying " + str(quantity)
+                # email()
             except Exception as e:
                 print("Error buying")
+                sell = True
+                # if there is an error buying... set the hold to ETH
+                table.put_item(
+                Item={
+                'symbol': "MYHOLD",
+                'ETH-value': str(myEth),
+                'holdSymbol': "ETH",
+                'quantity': quantity,
+                'timeStamp': "blah"
+                })
     else:
         print("no breakouts or new breakouts")
         botActions = "no breakouts or new breakouts"
 
-#will buy with appropiate lot size and not just rounded ints
+#will buy in decimals instead of just ints
 def buy(ticker, quantity):
     binanceClient = Client(api_key, api_secret)
     bought = False
@@ -302,6 +284,7 @@ def buy(ticker, quantity):
         count = count + 1
         time.sleep(.5)
     
+#we want to buy tokens in whole numbers so add the .1% fee on
 def calculateBuyQuantity(holdETH, bestPrice):
     #just to make sure we have sufficient balance
     myEth = holdETH - holdETH * .001
@@ -315,8 +298,13 @@ def calculateBuyQuantity(holdETH, bestPrice):
     return int(quantity)
     
 def email():
-        SENDER = ""
-        RECIPIENT = ""
+        # Replace sender@example.com with your "From" address.
+        # This address must be verified with Amazon SES.
+        SENDER = "eorndahl@gmail.com"
+        
+        # Replace recipient@example.com with a "To" address. If your account 
+        # is still in the sandbox, this address must be verified.
+        RECIPIENT = "eorndahl@gmail.com"
         
         # If necessary, replace us-west-2 with the AWS Region you're using for Amazon SES.
         AWS_REGION = "us-east-1"
@@ -347,10 +335,6 @@ def email():
                 },
                 Message={
                     'Body': {
-                        # 'Html': {
-                        #     'Charset': CHARSET,
-                        #     'Data': BODY_HTML,
-                        # },
                         'Text': {
                             'Charset': CHARSET,
                             'Data': BODY_TEXT,
