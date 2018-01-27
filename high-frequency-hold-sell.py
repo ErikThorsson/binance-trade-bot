@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 
 dynamodb = boto3.resource('dynamodb')
 table = dynamodb.Table('coin-price-history')
-client = boto3.client('sns')
 lambda_client = boto3.client('lambda')
 
 api_key=""
@@ -25,31 +24,52 @@ global downturns
 global botActions
 global holdETH
 global coinPrices
-global balances
 global holdQ
 global holdPercentageChange
-global currentPrice
-global priceChangeList
 global xs
 global ys
+global marketXs
+global marketYs
 global intervalsPerScan
 global priceUpdateStart
+global marketPriceUpdateStart
 global counter
 xs = []
 ys = []
-priceChangeList = []
-currentPrice = 0.0
+marketXs = []
+marketYs = []
 holdPercentageChange = 0.0 
 holdQ = 0
 priceUpdateStart = 0
+marketPriceUpdateStart = 0
 counter = 0
     
 #scans for x seconds with y iterations per scan and then buys or sells based upon price direction and gain/loss %
 def lambda_handler(event, context):
+    global holdQ
+    global holdPercentageChange
+    global priceUpdateStart
+    global marketPriceUpdateStart
     global intervalsPerScan
     global counter
-    intervalsPerScan = 30
-    scanDuration = 300
+    global xs
+    global ys
+    global marketXs
+    global marketYs
+    xs = []
+    ys = []
+    marketXs = []
+    marketYs = []
+    holdPercentageChange = 0.0 
+    holdQ = 0
+    priceUpdateStart = 0
+    marketPriceUpdateStart = 0
+    counter = 0
+    intervalsPerScan = 28 
+    scanDuration = 295.67
+    counter = 0;
+    #run the other script to determine if another coin is rising faster than our current hold
+    lambda_client.invoke(FunctionName='BinanceAPItest', InvocationType='RequestResponse')
     for x in range(0, intervalsPerScan):
         holdOrSellHold()
         counter = counter + 1
@@ -68,8 +88,7 @@ def query_table(filter_key=None, filter_value=None):
 def getCurrentHold():
     global holdQ
     global holdETH
-    global currentPrice
-    
+
     hold = "MYHOLD"
     oldTicker = query_table("symbol", hold)['Items'][0]['holdSymbol']
     if oldTicker == "ETH":
@@ -85,7 +104,6 @@ def getCurrentHold():
     r = str(requests.get('https://api.binance.com/api/v1/ticker/price', params=params).json())
     price = float(r.split("price\': u\'")[1].split("\'")[0])
     holdETH = float(oldQuantity) * price
-    currentPrice = price
     updateLastPrice(price, oldTicker, oldBuyPrice)
     
     rounding = 3
@@ -94,7 +112,7 @@ def getCurrentHold():
         percentChange = 1
     else:
         percentChange = float(holdETH)/float(oldBuyPrice) * 100
-        # print("hold price " + str(oldBuyPrice) + " current price " + str(price))
+        print("hold price " + str(oldBuyPrice) + " current price " + str(price))
         percentChange = float(float(int(percentChange * 10 ** rounding))/10 ** rounding)    
     global holdPercentageChange
     holdPercentageChange = percentChange
@@ -132,25 +150,32 @@ def holdOrSellHold():
     global holdPercentageChange
     hold = getCurrentHold()
     if hold != "STOP":
-        # sell if we gained 1% and the price isn't going up or if it's gone down by 1-1.9% (more than that might just be a temprary price shift)
-        if (holdPercentageChange > 101 and priceGoingDown() == True) or (holdPercentageChange < 99 and holdPercentageChange > 98):
-            print("selling " + hold + " @ " + str(holdPercentageChange) + "%")
+        isMarketGoingDown = marketGoingDown()
+        # sell if we gained % and the price isn't going up or if it's gone down by 2.5-3.5% and is still moving down. 
+        #(more than that might just be a temprary price shift). Don't sell if the entire market is going down.
+        if(priceGoingDown() == True and isMarketGoingDown == False or (holdPercentageChange < 97.5 and holdPercentageChange > 96.5 and priceGoingDown() == True and isMarketGoingDown == False)):
+            print("selling " + hold + " @ " + str(holdPercentageChange - 100) + "%")
             sellHoldForEth(hold)
         else:
             print("holding " + hold)
     else:
+        #if our hold is ETH buy the fastest rising coin
         print("Waiting on trade")
         lambda_client.invoke(FunctionName='BinanceAPItest', InvocationType='RequestResponse')
 
 #identifies if the price is going down
 def priceGoingDown():
+    global xs
+    global ys
     global priceUpdateStart
+    global intervalsPerScan
+
     slope = 0.0
     #if we are at our final iteration take the slope
-    global intervalsPerScan
+    print("intervals " + str(intervalsPerScan) + " priceUpdateStart " + str(priceUpdateStart) + " count " + str(len(xs)))
     if len(xs) == intervalsPerScan - priceUpdateStart + 1:
-        slope = bestFit()
-        #if our slope after 1 minute is positive hold
+        print("Hold slope:")
+        slope = bestFit(xs, ys)
         if slope < 0:
             return True
         else:
@@ -158,12 +183,60 @@ def priceGoingDown():
     #if not our final iteration, hold
     else:
         return False
+    
+def marketGoingDown():
+    global marketXs
+    global marketYs
+    global marketPriceUpdateStart
+    global intervalsPerScan
+    global counter
+    
+    if marketPriceUpdateStart == 0:
+        marketPriceUpdateStart = counter
+
+    #symbol price
+    priceList = str(requests.get('https://api.binance.com/api/v1/ticker/allPrices').json())
+    coinArray = priceList.split("{u\'symbol\': u\'")
+
+    marketPriceSum = 0.0
+    count = 1
+    for coin in coinArray:
+        if not coin.__eq__("["):
+            ticker = coin.split('\',')[0]
+            price = coin.split('u\'price\': u\'')[1].split("\'},")[0]
+            if price.__contains__("\'}]"):
+                price = str(price).split("\'}]")[0]
+            #only use the prices of ETH pairs
+            if ticker.__contains__("ETH") and not ticker.__contains__("ETHBTC"):
+                marketPriceSum = marketPriceSum + float(price)
+                count = count + 1
+                # print(ticker + " " + price)
         
-def bestFit():
+    # set the time and price for the average of the market
+    marketXs.append(len(marketXs))
+    print(str(marketPriceSum) + " count " + str(count))
+    marketAveragePrice = marketPriceSum / float(count)
+    marketYs.append(marketAveragePrice)
+    print("market avg " + str(marketAveragePrice) + " " + str(len(marketXs)))
+    
+    if len(marketXs) == intervalsPerScan - marketPriceUpdateStart + 1:
+        print("Market slope:")
+        slope = bestFit(marketXs, marketYs)
+        #if the entire market is down more than 5% return true
+        if slope < 5:
+            return True
+        else:
+            return False
+    #if not our final iteration, hold
+    else:
+        return False
+
+def bestFit(xs, ys):
     sum_x= 0.0
     sum_y= 0.0
     sum_xy= 0.0
     sum_x2 = 0.0
+    
     #loop over data:
     for count in range(len(xs)):
         sum_x = sum_x + xs[count]
@@ -182,6 +255,7 @@ def bestFit():
     intersect = mean_y - slope * mean_x
     print("slope: " + str(slope))
     return slope
+    
 #
 #Binance API Wrapper
 #
