@@ -15,59 +15,171 @@ from datetime import datetime, timedelta
 dynamodb = boto3.resource('dynamodb')
 table = dynamodb.Table('coin-price-history')
 global prices
-xs = []
-ys = []
 global xs
 global ys
+global holdSymbol
+global usdtValue
+global ethQuantity
+global timeStamp
+global  binanceClient
+global maximaAverage
+global averagePrice
+xs = []
+ys = []
+timeStamp = ""
+holdSymbol = ""
+usdtValue = 0.0
+maximaAverage = 0.0
+averagePrice = 0.0
+api_key=""
+api_secret=""
 
 #buys or sells depending on where the price is compared to moving averages
 def lambda_handler(event, context):
-  price = getCurrentPrice()
-  calculatePriceByHours(1, price)
-  # calculatePriceByHours(3, price)
-  # calculatePriceByHours(6, price)
-  calculatePriceByHours(12, price)
-  # calculatePriceByHours(24, price)
-  calculatePriceByHours(72, price)
-  # calculatePriceByHours(24 * 7, price)
-  # calculatePriceByHours(24 * 14, price)
+  global holdSymbol
+  global ethQuantity
+  global usdtValue
+  global timeStamp
+  global binanceClient
+  binanceClient = Client(api_key, api_secret)
+  ethQuantity = getMyEthQuantity()
+  timeStamp = str(datetime.now())
+  
+  getCurrentHoldValues()
+  ethPrice = getCurrentPrice()
+  buy = calculatePriceByHours(6, ethPrice)
+  
+#   sellETHForUSDT(ethPrice * ethQuantity)
+#   buyETHWithUSDT(usdtValue, price)
+  
+  #we will buy ETH if the price is below the average 6 hour price + 1/2 the average maxima price
+  if buy == True and holdSymbol == "USDT":
+    buyETHWithUSDT(usdtValue, ethPrice)
+  elif buy == True and holdSymbol == "ETH":
+     #if we are holding ETH, reprice the ETH hold for dynamo
+     setETHholdValue(ethPrice)
+  
+  priceSlopeSinceLastIteration = priceSlopeByHours(.17)
+  #However, also buy ETH if it's above the mean + 1/2 the average maxima price and the price is moving up
+  #This allows for buying breakouts
+  if buy == False and holdSymbol == "USDT" and priceSlopeSinceLastIteration > 0:
+    print("Buying above mean because price is rising")
+    buyETHWithUSDT(usdtValue, ethPrice)
+  else:
+    updateUSDThold(usdtValue, ethPrice)
+    
+  #Sell ETH if our current price is above .95 the average maxima price
+  #and the price has moved down on average over the past 10 min 
+  if buy == False and holdSymbol == "ETH" and priceSlopeSinceLastIteration < 0 and ethPrice < maximaAverage:
+    sellETHForUSDT(ethPrice * ethQuantity)
+  elif buy == False and holdSymbol == "ETH":
+    if priceSlopeSinceLastIteration < 0:
+        slopeDirection = "negative"
+    else:
+        slopeDirection = "positive"
+    print("Not selling ETH. The price slope is " + slopeDirection + " and the price is below the maxima average.")
     
 def getCurrentPrice():
   #get current price of hold
   params = {"symbol": "ETHUSDT"}
   r = str(requests.get('https://api.binance.com/api/v1/ticker/price', params=params).json())
-  price = float(r.split("price\': u\'")[1].split("\'")[0])
-  print("------------------------\ncurrent ETH price " + str(price) + "\n------------------------")
-  savePrice(price)
-  return price
+  ethPrice = float(r.split("price\': u\'")[1].split("\'")[0])
+  print("------------------------\ncurrent ETH price " + str(ethPrice) + "\n------------------------")
+  savePrice(ethPrice)
+  return ethPrice
     
-def calculatePriceByHours(hours, price):
-  global xs
-  global ys
-  xs = []
-  ys = []
+def getMyEthQuantity():
+    global binanceClient
+    response = binanceClient.get_account()
+    #return ETH balance
+    return response["balances"][2]["free"]
+    
+def getUSDTQuantity():
+    global binanceClient
+    response = binanceClient.get_account()
+    return response["balances"][16]["free"]
+  
+def calculatePriceByHours(hours, ethPrice):
+  global maximaAverage
+  global averagePrice
   slope = priceSlopeByHours(hours)
   maximaAverage = findMaxima(ys)
-  print("Maxima average price " + str(maximaAverage))
   averagePrice = slope * len(xs) + ys[0]
-  print("Average " + str(hours) + " hours price: " + str(averagePrice))
+  print("Maxima average price " + str(maximaAverage))
   averagePricePlusHalfOfMaximaAverage = float(averagePrice) + .5 * float(maximaAverage - averagePrice)
-  print("Average cost plus difference of 1/2 of maxima: " + str(averagePricePlusHalfOfMaximaAverage))
-  print("Buy? " + str(isABuy(price, averagePricePlusHalfOfMaximaAverage)))
-
+  print("Average cost plus difference of 1/2 of maxima:" +  str(averagePricePlusHalfOfMaximaAverage))
+  print("Average " + str(hours) + " hours price: " + str(averagePrice))
+  print("Price below average cost plus difference of 1/2 of maxima? " + str(isABuy(ethPrice, averagePricePlusHalfOfMaximaAverage)))
+  return isABuy(ethPrice, averagePricePlusHalfOfMaximaAverage)
 
 #we should buy and sell in increments.. and not all at once 
 
-def savePrice(price):
+def savePrice(ethPrice):
+  global timeStamp
   table.put_item(
         Item={
         'symbol': "ETH",
-        'price-USD': str(price),
-        'timeStamp': str(datetime.now())
+        'price-USD': str(ethPrice),
+        'timeStamp': timeStamp
         })
         
-def isABuy(price, averagePricePlusHalfOfMaximaAverage):
-  if price < averagePricePlusHalfOfMaximaAverage:
+def sellETHForUSDT(tradeValue):
+    global ethQuantity
+    global timeStamp
+    ethQuantity = ethQuantity - ethQuantity * .001
+    rounding = 5
+    ethQuantity = float(float(int(ethQuantity * 10 ** rounding))/10 ** rounding)
+    print("Selling " + str(ethQuantity) + " ETH for $" + str(tradeValue))
+    table.put_item(
+        Item={
+        'symbol': "ETHTRADER",
+        'hold-symbol' : 'USDT',
+        'USD-value': str(tradeValue),
+        'ETH-quantity' : str(ethQuantity),
+        'timeStamp': timeStamp
+        })
+    binanceClient = Client(api_key, api_secret)
+    response = binanceClient.order_market_sell(symbol="ETHUSDT", quantity=ethQuantity)
+    print(response)
+        
+def buyETHWithUSDT(usd, ethPrice):
+    global timeStamp
+    ethQuantity = float(usd)/float(ethPrice)
+    ethQuantity = ethQuantity - ethQuantity * .001
+    rounding = 5
+    ethQuantity = float(float(int(ethQuantity * 10 ** rounding))/10 ** rounding)
+    print("Buying " + str(ethQuantity) + " ETH with $" + usd)
+    binanceClient = Client(api_key, api_secret)
+    response = binanceClient.order_market_buy(symbol="ETHUSDT", quantity=ethQuantity)
+    print(response)
+    
+    table.put_item(
+        Item={
+        'symbol': "ETHTRADER",
+        'hold-symbol' : 'ETH',
+        'USD-value': str(usd),
+        'ETH-quantity' : str(ethQuantity),
+        'timeStamp': timeStamp
+    })
+
+def getCurrentHoldValues():
+    global holdSymbol
+    global ethQuantity
+    global usdtValue
+    
+    query = query_table_by_hours(1,"symbol", 'ETHTRADER')['Items']
+    lastIndex = len(query) - 1
+    holdSymbol = query[lastIndex]['hold-symbol']
+    ethQuantity = float(getMyEthQuantity())
+    #subtract the trade fee
+    ethQuantity = ethQuantity - ethQuantity * .001
+    rounding = 5
+    #round the quantity to a value we can trade
+    ethQuantity = float(float(int(ethQuantity * 10 ** rounding))/10 ** rounding)
+    usdtValue = getUSDTQuantity()
+
+def isABuy(ethPrice, averagePricePlusHalfOfMaximaAverage):
+  if ethPrice < averagePricePlusHalfOfMaximaAverage:
     return True
   else:
     return False
@@ -80,21 +192,9 @@ def priceSlopeByHours(hours):
     price = result[x]['price-USD']
     xs.append(float(x))
     ys.append(float(price))
-  # print(str(xs) + "\n" + str(ys))
   slope = bestFit("ETH price " + str(hours) + " hours:", xs, ys)
   return slope
-
-def query_table_by_hours(hours, filter_key=None, filter_value=None):
-    if filter_key and filter_value:
-        dateTime = str(datetime.now() - timedelta(hours = hours))
-        filtering_exp = Key(filter_key).eq(filter_value) & Key("timeStamp").gt(dateTime)
-        date_filtering_exp = Key(filter_key).eq(filter_value)
-        response = table.query(KeyConditionExpression=filtering_exp)
-    else:
-        response = table.query()
-
-    return response
-
+    
 #returns average of the maximas    
 def findMaxima(numbers):
   maxima = []
@@ -112,7 +212,7 @@ def findMaxima(numbers):
       maxima.append(numbers[length-1])
       
   return reduce(lambda x, y: x + y, maxima) / len(maxima)
-  
+        
 def bestFit(label, xs, ys):
     sum_x= 0.0
     sum_y= 0.0
@@ -137,10 +237,64 @@ def bestFit(label, xs, ys):
     intersect = mean_y - slope * mean_x
     print(label  + " slope: " + str(slope))
     return slope
+
+#--------------------------------------------------------------
+#-------------------Helper Methods-----------------------------
+#--------------------------------------------------------------
+
+def query_table_by_hours(hours, filter_key=None, filter_value=None):
+    if filter_key and filter_value:
+        dateTime = str(datetime.now() - timedelta(hours = hours))
+        filtering_exp = Key(filter_key).eq(filter_value) & Key("timeStamp").gt(dateTime)
+        date_filtering_exp = Key(filter_key).eq(filter_value)
+        response = table.query(KeyConditionExpression=filtering_exp)
+    else:
+        response = table.query()
+
+    return response
+
+def query_table(filter_key=None, filter_value=None):
+    if filter_key and filter_value:
+        filtering_exp = Key(filter_key).eq(filter_value)
+        date_filtering_exp = Key(filter_key).eq(filter_value)
+        response = table.query(KeyConditionExpression=filtering_exp)
+    else:
+        response = table.query()
+        
+    return response
+    
+def setETHholdValue(ethPrice):
+    global ethQuantity
+    global timeStamp
+    ethValue = str(ethQuantity * ethPrice)
+    print("ETH hold value is " + ethValue)
+    table.put_item(
+        Item={
+        'symbol': "ETHTRADER",
+        'hold-symbol' : 'ETH',
+        'USD-value': ethValue,
+        'ETH-quantity' : str(ethQuantity),
+        'timeStamp': timeStamp
+        })
+
+def updateUSDThold(usd, ethPrice):
+    global ethQuantity
+    global timeStamp
+    ethQuantity = float(usd)/float(ethPrice)
+    print("USDT hold value is " + usd)
+    table.put_item(
+        Item={
+        'symbol': "ETHTRADER",
+        'hold-symbol' : 'ETH',
+        'USD-value': str(usdtValue),
+        'ETH-quantity' : str(ethQuantity),
+        'timeStamp': timeStamp
+        })
   
 #--------------------------------------------------------------
 #-------------------Binance API Wrapper------------------------
 #--------------------------------------------------------------
+#From someone else's github
 
 if six.PY2:
     from urllib import urlencode
