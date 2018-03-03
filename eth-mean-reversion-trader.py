@@ -23,7 +23,6 @@ global ethQuantity
 global timeStamp
 global  binanceClient
 global maximaAverage
-global averagePrice
 xs = []
 ys = []
 timeStamp = ""
@@ -36,9 +35,7 @@ api_secret=""
 
 #buys or sells depending on where the price is compared to moving averages
 def lambda_handler(event, context):
-  global holdSymbol
   global ethQuantity
-  global usdtValue
   global timeStamp
   global binanceClient
   binanceClient = Client(api_key, api_secret)
@@ -70,7 +67,7 @@ def lambda_handler(event, context):
     
   #Sell ETH if our current price is above .95 the average maxima price
   #and the price has moved down on average over the past 10 min 
-  if buy == False and holdSymbol == "ETH" and priceSlopeSinceLastIteration < 0 and ethPrice < maximaAverage:
+  if buy == False and holdSymbol == "ETH" and priceSlopeSinceLastIteration < 0 and ethPrice > maximaAverage:
     sellETHForUSDT(ethPrice * ethQuantity)
   elif buy == False and holdSymbol == "ETH":
     if priceSlopeSinceLastIteration < 0:
@@ -89,19 +86,16 @@ def getCurrentPrice():
   return ethPrice
     
 def getMyEthQuantity():
-    global binanceClient
     response = binanceClient.get_account()
     #return ETH balance
     return response["balances"][2]["free"]
     
 def getUSDTQuantity():
-    global binanceClient
     response = binanceClient.get_account()
     return response["balances"][16]["free"]
   
 def calculatePriceByHours(hours, ethPrice):
   global maximaAverage
-  global averagePrice
   slope = priceSlopeByHours(hours)
   maximaAverage = findMaxima(ys)
   averagePrice = slope * len(xs) + ys[0]
@@ -115,7 +109,6 @@ def calculatePriceByHours(hours, ethPrice):
 #we should buy and sell in increments.. and not all at once 
 
 def savePrice(ethPrice):
-  global timeStamp
   table.put_item(
         Item={
         'symbol': "ETH",
@@ -125,7 +118,6 @@ def savePrice(ethPrice):
         
 def sellETHForUSDT(tradeValue):
     global ethQuantity
-    global timeStamp
     ethQuantity = ethQuantity - ethQuantity * .001
     rounding = 5
     ethQuantity = float(float(int(ethQuantity * 10 ** rounding))/10 ** rounding)
@@ -143,7 +135,6 @@ def sellETHForUSDT(tradeValue):
     print(response)
         
 def buyETHWithUSDT(usd, ethPrice):
-    global timeStamp
     ethQuantity = float(usd)/float(ethPrice)
     ethQuantity = ethQuantity - ethQuantity * .001
     rounding = 5
@@ -264,8 +255,6 @@ def query_table(filter_key=None, filter_value=None):
     return response
     
 def setETHholdValue(ethPrice):
-    global ethQuantity
-    global timeStamp
     ethValue = str(ethQuantity * ethPrice)
     print("ETH hold value is " + ethValue)
     table.put_item(
@@ -279,13 +268,12 @@ def setETHholdValue(ethPrice):
 
 def updateUSDThold(usd, ethPrice):
     global ethQuantity
-    global timeStamp
     ethQuantity = float(usd)/float(ethPrice)
-    print("USDT hold value is " + usd)
+    print("USDT hold value is " + str(usd))
     table.put_item(
         Item={
         'symbol': "ETHTRADER",
-        'hold-symbol' : 'ETH',
+        'hold-symbol' : 'USDT',
         'USD-value': str(usdtValue),
         'ETH-quantity' : str(ethQuantity),
         'timeStamp': timeStamp
